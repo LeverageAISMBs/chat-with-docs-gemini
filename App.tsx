@@ -61,10 +61,14 @@ const App: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [storedFiles, setStoredFiles] = useState<StoredFile[]>([]);
   
+  // Refs for managing voice session resources
   const sessionPromiseRef = useRef<any>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
+  const inputAudioContextRef = useRef<AudioContext | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
   const nextStartTimeRef = useRef(0);
   const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  
   let currentInputTranscription = '';
   let currentOutputTranscription = '';
 
@@ -336,6 +340,29 @@ const App: React.FC = () => {
     handleSendMessage(query);
   };
   
+  const handleCleanup = useCallback(() => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      mediaStreamRef.current = null;
+    }
+    if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
+      inputAudioContextRef.current.close().catch(console.error);
+    }
+    inputAudioContextRef.current = null;
+
+    if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
+      outputAudioContextRef.current.close().catch(console.error);
+    }
+    outputAudioContextRef.current = null;
+    
+    audioSourcesRef.current.forEach(source => source.stop());
+    audioSourcesRef.current.clear();
+    nextStartTimeRef.current = 0;
+    
+    sessionPromiseRef.current = null;
+    setIsRecording(false);
+  }, []);
+  
   const handleToggleRecording = async () => {
     const apiKey = process.env.API_KEY;
     if (!apiKey) {
@@ -345,6 +372,7 @@ const App: React.FC = () => {
 
     if (isRecording) {
       sessionPromiseRef.current?.then((session: any) => session.close());
+      // onclose callback will trigger cleanup
       return;
     }
 
@@ -353,18 +381,9 @@ const App: React.FC = () => {
 
     const ai = new GoogleGenAI({ apiKey });
     
-    const handleCleanup = () => {
-      setIsRecording(false);
-      sessionPromiseRef.current = null;
-      if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
-        outputAudioContextRef.current.close();
-      }
-      outputAudioContextRef.current = null;
-    };
-    
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+      mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
 
       const activeFiles = storedFiles.filter(f => f.isActive);
@@ -388,9 +407,10 @@ const App: React.FC = () => {
         },
         callbacks: {
           onopen: () => {
+            if (!mediaStreamRef.current || !inputAudioContextRef.current) return;
             setChatMessages(prev => [...prev.filter(m => m.text !== 'Connecting to voice session...'), { id: `status-${Date.now()}`, text: 'Connection open. Start speaking.', sender: MessageSender.SYSTEM, timestamp: new Date() }]);
-            const source = inputAudioContext.createMediaStreamSource(stream);
-            const scriptProcessor = inputAudioContext.createScriptProcessor(4096, 1, 1);
+            const source = inputAudioContextRef.current.createMediaStreamSource(mediaStreamRef.current);
+            const scriptProcessor = inputAudioContextRef.current.createScriptProcessor(4096, 1, 1);
             
             scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
               const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
@@ -400,7 +420,7 @@ const App: React.FC = () => {
               });
             };
             source.connect(scriptProcessor);
-            scriptProcessor.connect(inputAudioContext.destination);
+            scriptProcessor.connect(inputAudioContextRef.current.destination);
           },
           onmessage: async (message: LiveServerMessage) => {
             if (message.serverContent?.inputTranscription) {
@@ -441,15 +461,11 @@ const App: React.FC = () => {
           },
           onclose: () => {
             setChatMessages(prev => [...prev, { id: `status-${Date.now()}`, text: 'Voice session closed.', sender: MessageSender.SYSTEM, timestamp: new Date() }]);
-            stream.getTracks().forEach(track => track.stop());
-            inputAudioContext.close();
             handleCleanup();
           },
           onerror: (e: ErrorEvent) => {
             console.error('Live session error:', e);
             setChatMessages(prev => [...prev, { id: `err-${Date.now()}`, text: `Voice session error: ${e.message}`, sender: MessageSender.SYSTEM, timestamp: new Date() }]);
-            stream.getTracks().forEach(track => track.stop());
-            inputAudioContext.close();
             handleCleanup();
           },
         },
