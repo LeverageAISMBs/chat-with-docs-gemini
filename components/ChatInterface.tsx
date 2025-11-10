@@ -6,7 +6,7 @@
 import React from 'react';
 import { ChatMessage, MessageSender, Model } from '../types'; 
 import MessageItem from './MessageItem';
-import { Send, Menu, Mic } from 'lucide-react';
+import { Send, Menu, Mic, Radio } from 'lucide-react';
 
 interface ChatInterfaceProps {
   messages: ChatMessage[];
@@ -21,6 +21,8 @@ interface ChatInterfaceProps {
   onModelChange: (model: Model) => void;
   isRecording: boolean;
   onToggleRecording: () => void;
+  isSessionRecording: boolean;
+  onToggleSessionRecording: () => void;
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ 
@@ -36,6 +38,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   onModelChange,
   isRecording,
   onToggleRecording,
+  isSessionRecording,
+  onToggleSessionRecording,
 }) => {
   const [userQuery, setUserQuery] = React.useState('');
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
@@ -157,13 +161,24 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             }
           </button>
           <button
+            onClick={onToggleSessionRecording}
+            disabled={isRecording || selectedModel !== Model.VOICE_CONVERSATION}
+            className={`h-8 w-8 p-1.5 rounded-lg transition-colors flex items-center justify-center flex-shrink-0
+              ${isSessionRecording ? 'bg-red-500/80 hover:bg-red-500/90 text-white' : 'bg-white/[.12] hover:bg-white/20 text-white'}
+              disabled:bg-[#4A4A4A] disabled:text-[#777777] disabled:cursor-not-allowed
+            `}
+            aria-label={isSessionRecording ? "Disable recording for next session" : "Enable recording for next session"}
+          >
+            <Radio size={16} />
+          </button>
+          <button
             onClick={onToggleRecording}
             disabled={isLoading || isFetchingSuggestions || selectedModel !== Model.VOICE_CONVERSATION}
             className={`h-8 w-8 p-1.5 rounded-lg transition-colors flex items-center justify-center flex-shrink-0
-              ${isRecording ? 'bg-red-500/80 hover:bg-red-500/90 text-white' : 'bg-white/[.12] hover:bg-white/20 text-white'}
+              ${isRecording ? 'bg-red-500/80 hover:bg-red-500/90 text-white animate-pulse' : 'bg-white/[.12] hover:bg-white/20 text-white'}
               disabled:bg-[#4A4A4A] disabled:text-[#777777] disabled:cursor-not-allowed
             `}
-            aria-label={isRecording ? "Stop recording" : "Start recording"}
+            aria-label={isRecording ? "Stop voice session" : "Start voice session"}
           >
             <Mic size={16} />
           </button>

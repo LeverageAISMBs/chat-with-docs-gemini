@@ -7,6 +7,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ChatMessage, MessageSender, URLGroup, Model, StoredFile } from './types';
 import { generateContentWithUrlContext, getInitialSuggestions, decode, decodeAudioData, createBlob, generateContentWithGoogleSearch } from './services/geminiService';
 import * as storageService from './services/storageService';
+import * as audioService from './services/audioService';
 import KnowledgeBaseManager from './components/KnowledgeBaseManager';
 import ChatInterface from './components/ChatInterface';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
@@ -59,6 +60,7 @@ const App: React.FC = () => {
   
   const [selectedModel, setSelectedModel] = useState<Model>(Model.CHAT_WITH_DOCS);
   const [isRecording, setIsRecording] = useState(false);
+  const [isSessionRecording, setIsSessionRecording] = useState(false);
   const [storedFiles, setStoredFiles] = useState<StoredFile[]>([]);
   
   // Refs for managing voice session resources
@@ -68,6 +70,7 @@ const App: React.FC = () => {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const nextStartTimeRef = useRef(0);
   const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const modelAudioChunksRef = useRef<Float32Array[]>([]);
   
   let currentInputTranscription = '';
   let currentOutputTranscription = '';
@@ -274,7 +277,7 @@ const App: React.FC = () => {
     setIsLoading(true);
     setInitialQuerySuggestions([]); 
 
-    const activeFiles = storedFiles.filter(f => f.isActive);
+    const activeFiles = storedFiles.filter(f => f.isActive && f.type.startsWith('text/'));
     let fullQuery = query;
 
     if (activeFiles.length > 0) {
@@ -341,6 +344,34 @@ const App: React.FC = () => {
   };
   
   const handleCleanup = useCallback(() => {
+    // Finalize and save recording if active
+    if (isSessionRecording && modelAudioChunksRef.current.length > 0) {
+      const recordingBlob = audioService.createWavBlob(modelAudioChunksRef.current, 24000);
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const content = e.target?.result as string;
+          const timestamp = new Date().toLocaleString().replace(/[/:]/g, '-');
+          const newFile: Omit<StoredFile, 'id'> = {
+            name: `Recording-${timestamp}.wav`,
+            type: 'audio/wav',
+            size: recordingBlob.size,
+            content: content,
+            isActive: false, // Recordings are not active context by default
+          };
+          const savedFile = await storageService.saveFile(newFile);
+          setStoredFiles(prevFiles => [...prevFiles, savedFile]);
+          setChatMessages(prev => [...prev, { id: `sys-rec-saved-${Date.now()}`, text: `Recording saved as "${savedFile.name}" in Files.`, sender: MessageSender.SYSTEM, timestamp: new Date() }]);
+        } catch (saveError) {
+          console.error("Error saving recording:", saveError);
+          setChatMessages(prev => [...prev, { id: `sys-err-rec-save-${Date.now()}`, text: `Error saving recording: ${String(saveError)}`, sender: MessageSender.SYSTEM, timestamp: new Date() }]);
+        }
+      };
+      reader.readAsDataURL(recordingBlob); // Read as Base64 Data URL
+    }
+    modelAudioChunksRef.current = [];
+    setIsSessionRecording(false); // Always turn off recording state on cleanup
+
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(track => track.stop());
       mediaStreamRef.current = null;
@@ -361,7 +392,7 @@ const App: React.FC = () => {
     
     sessionPromiseRef.current = null;
     setIsRecording(false);
-  }, []);
+  }, [isSessionRecording]);
   
   const handleToggleRecording = async () => {
     const apiKey = process.env.API_KEY;
@@ -378,6 +409,11 @@ const App: React.FC = () => {
 
     setIsRecording(true);
     setChatMessages(prev => [...prev, { id: `status-${Date.now()}`, text: 'Connecting to voice session...', sender: MessageSender.SYSTEM, timestamp: new Date() }]);
+    
+    if (isSessionRecording) {
+      modelAudioChunksRef.current = []; // Clear previous recording chunks
+      setChatMessages(prev => [...prev, { id: `status-rec-start-${Date.now()}`, text: 'Recording of model audio has started.', sender: MessageSender.SYSTEM, timestamp: new Date() }]);
+    }
 
     const ai = new GoogleGenAI({ apiKey });
     
@@ -386,7 +422,7 @@ const App: React.FC = () => {
       inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
 
-      const activeFiles = storedFiles.filter(f => f.isActive);
+      const activeFiles = storedFiles.filter(f => f.isActive && f.type.startsWith('text/'));
       let fileContextInstruction = '';
       if (activeFiles.length > 0) {
           fileContextInstruction = `In addition to the URLs, use the following file contents as primary context for your answers:\n\n` + activeFiles.map(file => 
@@ -445,6 +481,11 @@ const App: React.FC = () => {
               const ctx = outputAudioContextRef.current;
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
               const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, 24000, 1);
+              
+              if (isSessionRecording) {
+                modelAudioChunksRef.current.push(audioBuffer.getChannelData(0));
+              }
+
               const source = ctx.createBufferSource();
               source.buffer = audioBuffer;
               source.connect(ctx.destination);
@@ -539,6 +580,8 @@ const App: React.FC = () => {
             onModelChange={setSelectedModel}
             isRecording={isRecording}
             onToggleRecording={handleToggleRecording}
+            isSessionRecording={isSessionRecording}
+            onToggleSessionRecording={() => setIsSessionRecording(prev => !prev)}
           />
         </div>
       </div>
