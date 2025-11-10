@@ -4,7 +4,7 @@
 */
 
 
-import { GoogleGenAI, GenerateContentResponse, Tool, HarmCategory, HarmBlockThreshold, Content } from "@google/genai";
+import { GoogleGenAI, GenerateContentResponse, Tool, HarmCategory, HarmBlockThreshold, Content, Blob } from "@google/genai";
 import { UrlContextMetadataItem } from '../types';
 
 // IMPORTANT: The API key MUST be set as an environment variable `process.env.API_KEY`
@@ -13,7 +13,8 @@ const API_KEY = process.env.API_KEY;
 let ai: GoogleGenAI;
 
 // Model supporting URL context, consistent with user examples and documentation.
-const MODEL_NAME = "gemini-2.5-flash"; 
+const URL_CONTEXT_MODEL = "gemini-2.5-flash"; 
+const SEARCH_MODEL = "gemini-2.5-pro";
 
 const getAiInstance = (): GoogleGenAI => {
   if (!API_KEY) {
@@ -26,6 +27,58 @@ const getAiInstance = (): GoogleGenAI => {
   return ai;
 };
 
+// Audio Helper Functions for Live API
+export function decode(base64: string) {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+export async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number,
+  numChannels: number,
+): Promise<AudioBuffer> {
+  const dataInt16 = new Int16Array(data.buffer);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
+  }
+  return buffer;
+}
+
+export function encode(bytes: Uint8Array) {
+  let binary = '';
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+export function createBlob(data: Float32Array): Blob {
+  const l = data.length;
+  const int16 = new Int16Array(l);
+  for (let i = 0; i < l; i++) {
+    int16[i] = data[i] * 32768;
+  }
+  return {
+    data: encode(new Uint8Array(int16.buffer)),
+    mimeType: 'audio/pcm;rate=16000',
+  };
+}
+
+
 const safetySettings = [
   { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
   { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
@@ -36,6 +89,7 @@ const safetySettings = [
 interface GeminiResponse {
   text: string;
   urlContextMetadata?: UrlContextMetadataItem[];
+  groundingMetadata?: any;
 }
 
 export const generateContentWithUrlContext = async (
@@ -44,18 +98,14 @@ export const generateContentWithUrlContext = async (
 ): Promise<GeminiResponse> => {
   const currentAi = getAiInstance();
   
-  let fullPrompt = prompt;
-  if (urls.length > 0) {
-    const urlList = urls.join('\n');
-    fullPrompt = `${prompt}\n\nRelevant URLs for context:\n${urlList}`;
-  }
-
-  const tools: Tool[] = [{ urlContext: {} }];
-  const contents: Content[] = [{ role: "user", parts: [{ text: fullPrompt }] }];
+  // Note: The model does not need the URLs in the prompt text when using the urlContext tool.
+  // The tool provides the context directly.
+  const tools: Tool[] = urls.length > 0 ? [{ urlContext: {} }] : [];
+  const contents: Content[] = [{ role: "user", parts: [{ text: prompt }] }];
 
   try {
     const response: GenerateContentResponse = await currentAi.models.generateContent({
-      model: MODEL_NAME,
+      model: URL_CONTEXT_MODEL,
       contents: contents,
       config: { 
         tools: tools,
@@ -67,15 +117,8 @@ export const generateContentWithUrlContext = async (
     const candidate = response.candidates?.[0];
     let extractedUrlContextMetadata: UrlContextMetadataItem[] | undefined = undefined;
 
-    if (candidate && candidate.urlContextMetadata && candidate.urlContextMetadata.urlMetadata) {
-      console.log("Raw candidate.urlContextMetadata.urlMetadata from API/SDK:", JSON.stringify(candidate.urlContextMetadata.urlMetadata, null, 2));
-      // Assuming SDK converts snake_case to camelCase, UrlContextMetadataItem type (now camelCase) should match items in urlMetadata.
+    if (candidate?.urlContextMetadata?.urlMetadata) {
       extractedUrlContextMetadata = candidate.urlContextMetadata.urlMetadata as UrlContextMetadataItem[];
-    } else if (candidate && candidate.urlContextMetadata) {
-      // This case implies urlContextMetadata exists but urlMetadata field might be missing or empty.
-      console.warn("candidate.urlContextMetadata is present, but 'urlMetadata' field is missing or empty:", JSON.stringify(candidate.urlContextMetadata, null, 2));
-    } else {
-      // console.log("No urlContextMetadata found in the Gemini API response candidate.");
     }
     
     return { text, urlContextMetadata: extractedUrlContextMetadata };
@@ -99,16 +142,49 @@ export const generateContentWithUrlContext = async (
   }
 };
 
+export const generateContentWithGoogleSearch = async (
+  prompt: string
+): Promise<GeminiResponse> => {
+  const currentAi = getAiInstance();
+  const tools: Tool[] = [{ googleSearch: {} }];
+  const contents: Content[] = [{ role: "user", parts: [{ text: prompt }] }];
+  
+  try {
+    const response: GenerateContentResponse = await currentAi.models.generateContent({
+      model: SEARCH_MODEL,
+      contents: contents,
+      config: {
+        tools: tools,
+        safetySettings: safetySettings,
+      },
+    });
+    
+    const text = response.text;
+    const groundingMetadata = response.candidates?.[0]?.groundingMetadata;
+    
+    return { text, groundingMetadata };
+
+  } catch (error) {
+    console.error("Error calling Gemini API with Google Search:", error);
+    if (error instanceof Error) {
+      const googleError = error as any; 
+      if (googleError.message && googleError.message.includes("API key not valid")) {
+         throw new Error("Invalid API Key. Please check your GEMINI_API_KEY environment variable.");
+      }
+      throw new Error(`Failed to get response from AI: ${error.message}`);
+    }
+    throw new Error("Failed to get response from AI due to an unknown error.");
+  }
+};
+
 // This function now aims to get a JSON array of string suggestions.
 export const getInitialSuggestions = async (urls: string[]): Promise<GeminiResponse> => {
   if (urls.length === 0) {
-    // This case should ideally be handled by the caller, but as a fallback:
     return { text: JSON.stringify({ suggestions: ["Add some URLs to get topic suggestions."] }) };
   }
   const currentAi = getAiInstance();
   const urlList = urls.join('\n');
   
-  // Prompt updated to request JSON output of short questions
   const promptText = `Based on the content of the following documentation URLs, provide 3-4 concise and actionable questions a developer might ask to explore these documents. These questions should be suitable as quick-start prompts. Return ONLY a JSON object with a key "suggestions" containing an array of these question strings. For example: {"suggestions": ["What are the rate limits?", "How do I get an API key?", "Explain model X."]}
 
 Relevant URLs:
@@ -118,19 +194,16 @@ ${urlList}`;
 
   try {
     const response: GenerateContentResponse = await currentAi.models.generateContent({
-      model: MODEL_NAME,
+      model: URL_CONTEXT_MODEL,
       contents: contents,
       config: {
         safetySettings: safetySettings,
-        responseMimeType: "application/json", // Request JSON output
+        responseMimeType: "application/json",
       },
     });
 
-    const text = response.text; // This should be the JSON string
-    // urlContextMetadata is not expected here because tools cannot be used with responseMimeType: "application/json"
-    // const urlContextMetadata = response.candidates?.[0]?.urlContextMetadata?.urlMetadata as UrlContextMetadataItem[] | undefined;
-    
-    return { text /*, urlContextMetadata: undefined */ }; // Explicitly undefined or not included
+    const text = response.text;
+    return { text };
 
   } catch (error) {
     console.error("Error calling Gemini API for initial suggestions:", error);
@@ -138,10 +211,6 @@ ${urlList}`;
       const googleError = error as any; 
       if (googleError.message && googleError.message.includes("API key not valid")) {
          throw new Error("Invalid API Key for suggestions. Please check your GEMINI_API_KEY environment variable.");
-      }
-      // Check for the specific error message and re-throw a more informative one if needed
-      if (googleError.message && googleError.message.includes("Tool use with a response mime type: 'application/json' is unsupported")) {
-        throw new Error("Configuration error: Cannot use tools with JSON response type for suggestions. This should be fixed in the code.");
       }
       throw new Error(`Failed to get initial suggestions from AI: ${error.message}`);
     }

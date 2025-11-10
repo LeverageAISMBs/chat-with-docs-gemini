@@ -6,7 +6,7 @@
 import React from 'react';
 import { marked } from 'marked';
 import hljs from 'highlight.js';
-import { ChatMessage, MessageSender, UrlContextMetadataItem } from '../types';
+import { ChatMessage, MessageSender } from '../types';
 
 // Configure marked to use highlight.js for syntax highlighting
 marked.setOptions({
@@ -15,7 +15,7 @@ marked.setOptions({
     return hljs.highlight(code, { language }).value;
   },
   langPrefix: 'hljs language-', // Prefix for CSS classes
-} as any); // Added 'as any' to bypass the type error
+} as any);
 
 interface MessageItemProps {
   message: ChatMessage;
@@ -64,13 +64,13 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
         textColorClass = 'text-white';
     } else if (isSystem) {
         textColorClass = 'text-[#A8ABB4]';
-    } else { // Model loading, also use prose colors
+    } else { // Model loading
         textColorClass = 'text-[#E2E2E2]';
     }
     return <div className={`whitespace-pre-wrap text-sm ${textColorClass}`}>{message.text}</div>;
   };
   
-  let bubbleClasses = "p-3 rounded-lg shadow w-full "; // Added w-full
+  let bubbleClasses = "p-3 rounded-lg shadow w-full ";
 
   if (isUser) {
     bubbleClasses += "bg-white/[.12] text-white rounded-br-none";
@@ -79,6 +79,9 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
   } else { // System message
     bubbleClasses += "bg-[#2C2C2C] text-[#A8ABB4] rounded-bl-none";
   }
+
+  const hasUrlContext = isModel && message.urlContext && message.urlContext.length > 0;
+  const hasGroundingMetadata = isModel && message.groundingMetadata?.groundingChunks?.length > 0;
 
   return (
     <div className={`flex mb-4 ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -95,7 +98,7 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
             renderMessageContent()
           )}
           
-          {isModel && message.urlContext && message.urlContext.length > 0 && (
+          {hasUrlContext && (
             <div className="mt-2.5 pt-2.5 border-t border-[rgba(255,255,255,0.1)]">
               <h4 className="text-xs font-semibold text-[#A8ABB4] mb-1">Context URLs Retrieved:</h4>
               <ul className="space-y-0.5">
@@ -123,6 +126,25 @@ const MessageItem: React.FC<MessageItemProps> = ({ message }) => {
               </ul>
             </div>
           )}
+
+          {hasGroundingMetadata && (
+             <div className="mt-2.5 pt-2.5 border-t border-[rgba(255,255,255,0.1)]">
+              <h4 className="text-xs font-semibold text-[#A8ABB4] mb-1">Sources from Google Search:</h4>
+              <ul className="space-y-0.5">
+                {message.groundingMetadata.groundingChunks.map((chunk: any, index: number) => (
+                  chunk.web && (
+                    <li key={index} className="text-[11px] text-[#A8ABB4] flex items-center">
+                      <span className="flex-shrink-0 mr-1.5 px-1.5 py-0.5 bg-white/10 rounded-sm text-[9px] font-mono">{index + 1}</span>
+                      <a href={chunk.web.uri} target="_blank" rel="noopener noreferrer" className="hover:underline break-all text-[#79B8FF]" title={chunk.web.title}>
+                        {chunk.web.title || chunk.web.uri}
+                      </a>
+                    </li>
+                  )
+                ))}
+              </ul>
+            </div>
+          )}
+
         </div>
         {isUser && <SenderAvatar sender={message.sender} />}
       </div>
